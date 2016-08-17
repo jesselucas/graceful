@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -80,9 +79,12 @@ func (s *Server) ListenAndServe() error {
 // Stop stops s gracefully (or forcefully after timeout) and
 // closes its listener.
 func (s *Server) Stop() error {
+	s.mu.Lock()
 	if s.closed {
 		return errors.New("Server has been closed")
 	}
+
+	s.closed = true
 
 	// Make sure a listener was set
 	if s.listener != nil {
@@ -93,44 +95,33 @@ func (s *Server) Stop() error {
 	}
 
 	s.SetKeepAlivesEnabled(false)
-
-	// Wait for any connections to finish
-	wait := make(chan struct{})
-	go func() {
-		defer close(wait)
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
-
-		s.wg.Wait()
-	}()
-
-	// We block until all connections are closed or the connTimeout happens
-	// We wait the full length of the timeout to forcefully close any connections
-	// to avoid having a ConnState transition race
-	select {
-	case <-time.After(s.GracefulTimeout):
-		// graceful timed out so forcefully close all connections
-		s.mu.Lock()
-		for c, st := range s.conns {
-			// Force close any idle and new connections.
-			if st == http.StateIdle || st == http.StateNew {
-				c.Close()
-			}
+	for c, st := range s.conns {
+		// Force close any idle and new connections. Waiting for other connections
+		// to close on their own (within the timeout period)
+		if st == http.StateIdle || st == http.StateNew {
+			c.Close()
 		}
-		s.mu.Unlock()
-
-		return nil
-	case <-wait:
-		return nil
 	}
+
+	// If the GracefulTimeout happens then forcefully close all connections
+	t := time.AfterFunc(s.GracefulTimeout, func() {
+		for c := range s.conns {
+			c.Close()
+		}
+	})
+	defer t.Stop()
+
+	s.mu.Unlock()
+
+	// Block until all connections are closed
+	s.wg.Wait()
+	return nil
 }
 
 // connState setups the ConnState tracking hook to know which connections are idle
 func (s *Server) connState() {
 	// Set our ConnState to track idle connections
 	s.ConnState = func(c net.Conn, cs http.ConnState) {
-		fmt.Println(cs, c)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 

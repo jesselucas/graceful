@@ -111,7 +111,6 @@ func TestServerConnClose(t *testing.T) {
 
 	// Make sure there are zero connections
 	s.mu.Lock()
-	fmt.Println(len(s.conns), "conns")
 	if len(s.conns) > 0 {
 		t.Fatal("Should have 0 connections")
 	}
@@ -183,11 +182,11 @@ func TestServerCloseBlocking(t *testing.T) {
 		return c
 	}
 
-	// Keep one connection in StateNew (connected, but not sending anything)
+	// Dial to open a StateNew but don't send anything
 	cnew := dial()
 	defer cnew.Close()
 
-	// Keep one connection in StateIdle (idle after a request)
+	// Dial another connection but idle after a request to have StateIdle
 	cidle := dial()
 	defer cidle.Close()
 	cidle.Write([]byte("HEAD / HTTP/1.1\r\nHost: foo\r\n\r\n"))
@@ -205,4 +204,20 @@ func TestServerCloseBlocking(t *testing.T) {
 		t.Fatal("Should have 0 connections")
 	}
 	s.mu.Unlock()
+}
+
+func TestListenAndServe(t *testing.T) {
+	s := NewServer("")
+	stopc := make(chan struct{})
+	errc := make(chan error, 1)
+	go func() { errc <- s.ListenAndServe() }()
+	go func() { errc <- s.Stop(); close(stopc) }()
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-stopc:
+		return
+	}
 }
