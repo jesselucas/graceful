@@ -3,6 +3,7 @@ package graceful
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -210,6 +211,43 @@ func TestListenAndServe(t *testing.T) {
 	s := NewServer("")
 	stopc := make(chan struct{})
 	errc := make(chan error, 1)
+	go func() { errc <- s.ListenAndServe() }()
+	go func() { errc <- s.Stop(); close(stopc) }()
+
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-stopc:
+		return
+	}
+}
+
+func TestListenAndServeTLS(t *testing.T) {
+	s := NewServer("")
+	stopc := make(chan struct{})
+	errc := make(chan error, 1)
+
+	s.TLSConfig = &tls.Config{}
+	go func() { errc <- s.ListenAndServe() }()
+	go func() { errc <- s.Stop(); close(stopc) }()
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-stopc:
+		return
+	}
+}
+
+func TestListenAndServeTLSAddress(t *testing.T) {
+	s := NewServer("127.0.0.1:9000")
+	stopc := make(chan struct{})
+	errc := make(chan error, 1)
+
+	s.TLSConfig = &tls.Config{}
 	go func() { errc <- s.ListenAndServe() }()
 	go func() { errc <- s.Stop(); close(stopc) }()
 	select {
