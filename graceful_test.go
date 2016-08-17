@@ -1,9 +1,11 @@
 package graceful
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -63,6 +65,39 @@ func TestServer(t *testing.T) {
 	if string(got) != "hello" {
 		t.Errorf("got %q, want hello", string(got))
 	}
+}
+
+func TestServerConnClose(t *testing.T) {
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "Hello, client")
+	}))
+	defer ts.Close()
+
+	setHandler := func(s *Server) {
+		s.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, "hello")
+		})
+	}
+
+	// Set short GracefulTimeout for testing
+	setTimeout := func(s *Server) {
+		s.GracefulTimeout = 1 * time.Millisecond
+	}
+	s := NewServer("", setHandler, setTimeout)
+
+	// Set the test server config to the Server
+	ts.Config = &s.Server
+	ts.Start()
+
+	// Set listener
+	s.listener = ts.Listener
+
+	// Make a request
+	client := http.Client{}
+	_, err := client.Get(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Make sure there is only 1 connection
 	s.mu.Lock()
@@ -74,6 +109,14 @@ func TestServer(t *testing.T) {
 	// Stop the server
 	s.Stop()
 
+	// Make sure there are zero connections
+	s.mu.Lock()
+	fmt.Println(len(s.conns), "conns")
+	if len(s.conns) > 0 {
+		t.Fatal("Should have 0 connections")
+	}
+	s.mu.Unlock()
+
 	// Try to connect to the server after it's closed
 	_, err = client.Get(ts.URL)
 
@@ -81,13 +124,6 @@ func TestServer(t *testing.T) {
 	if err == nil {
 		t.Fatal("Should not accept new connections after close")
 	}
-
-	// Make sure there are zero connections
-	s.mu.Lock()
-	if len(s.conns) < 0 {
-		t.Fatal("Should have 0 connections")
-	}
-	s.mu.Unlock()
 }
 
 func TestServerWithContext(t *testing.T) {
@@ -112,4 +148,61 @@ func TestServerWithContext(t *testing.T) {
 		}
 		return
 	}
+}
+
+func TestServerCloseBlocking(t *testing.T) {
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "Hello, client")
+	}))
+	defer ts.Close()
+
+	setHandler := func(s *Server) {
+		s.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, "hello")
+		})
+	}
+
+	// // Set short GracefulTimeout for testing
+	setTimeout := func(s *Server) {
+		s.GracefulTimeout = 1 * time.Millisecond
+	}
+	s := NewServer("", setHandler, setTimeout)
+
+	// Set the test server config to the Server
+	ts.Config = &s.Server
+	ts.Start()
+
+	// Set listener
+	s.listener = ts.Listener
+
+	dial := func() net.Conn {
+		c, err := net.Dial("tcp", ts.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+
+	// Keep one connection in StateNew (connected, but not sending anything)
+	cnew := dial()
+	defer cnew.Close()
+
+	// Keep one connection in StateIdle (idle after a request)
+	cidle := dial()
+	defer cidle.Close()
+	cidle.Write([]byte("HEAD / HTTP/1.1\r\nHost: foo\r\n\r\n"))
+	_, err := http.ReadResponse(bufio.NewReader(cidle), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Make sure we don't block forever.
+	s.Stop()
+
+	// Make sure there are zero connections
+	s.mu.Lock()
+	if len(s.conns) > 0 {
+		t.Fatal("Should have 0 connections")
+	}
+	s.mu.Unlock()
 }
